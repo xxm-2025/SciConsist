@@ -11,7 +11,7 @@
     {
       "name": "claude-scholar",
       "version": "1.0.0",
-      "source": ".",
+      "source": "./",
       "description": "Semi-automated research assistant with skills for literature review, experiments, analysis, writing, and project knowledge management"
     }
   ]
