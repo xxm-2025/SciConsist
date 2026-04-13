@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -44,6 +45,7 @@ class ExtractionConfig:
     device: str = "cuda"
     cache_dir: str = "data/processed/features"
     use_full_figure: bool = True
+    fail_on_placeholder: bool = False
 
 
 class FeatureExtractor:
@@ -62,6 +64,8 @@ class FeatureExtractor:
         self.tokenizer = None
         self.image_processor = None
         self._loaded = False
+        self.vision_backend = "unknown"
+        self._warned_vision_model = False
 
     def load_model(self) -> None:
         """延迟加载模型到 GPU。仅在首次调用 extract 时触发。"""
@@ -72,7 +76,7 @@ class FeatureExtractor:
 
         # InternVL2.5-8B 使用 transformers AutoModel
         try:
-            from transformers import AutoModel, AutoTokenizer
+            from transformers import AutoImageProcessor, AutoModel, AutoTokenizer
 
             self.model = AutoModel.from_pretrained(
                 self.config.model_name,
@@ -86,15 +90,26 @@ class FeatureExtractor:
                 self.config.model_name,
                 trust_remote_code=True,
             )
+            try:
+                self.image_processor = AutoImageProcessor.from_pretrained(
+                    self.config.model_name,
+                    trust_remote_code=True,
+                )
+            except Exception:
+                self.image_processor = None
         except Exception as e:
             logger.warning(f"Failed to load {self.config.model_name}: {e}")
-            logger.info("Will use placeholder features for development.")
+            self.model = None
+            self.tokenizer = None
+            self.image_processor = None
+            self.vision_backend = "image_stats_fallback"
+            logger.info("Will use image-stats fallback features.")
 
         self._loaded = True
 
         # 自动推断 fuse_layer_indices
         if self.config.fuse_layer_indices is None and self.model is not None:
-            n_layers = self.model.config.num_hidden_layers
+            n_layers = self._infer_num_hidden_layers()
             self.config.fuse_layer_indices = [
                 n_layers // 4,
                 n_layers // 2,
@@ -102,6 +117,29 @@ class FeatureExtractor:
                 n_layers - 1,
             ]
             logger.info(f"Auto fuse layers: {self.config.fuse_layer_indices} (total {n_layers} layers)")
+
+    def _infer_num_hidden_layers(self) -> int:
+        """兼容不同模型配置结构，推断 hidden layers 数量。"""
+        if self.model is None:
+            return 32
+        cfg = getattr(self.model, "config", None)
+        if cfg is None:
+            return 32
+
+        candidates: list[Any] = [cfg]
+        for name in ["llm_config", "text_config", "language_config", "vision_config"]:
+            sub = getattr(cfg, name, None)
+            if sub is not None:
+                candidates.append(sub)
+
+        for c in candidates:
+            n = getattr(c, "num_hidden_layers", None)
+            if isinstance(n, int) and n > 0:
+                return n
+            n = getattr(c, "n_layer", None)
+            if isinstance(n, int) and n > 0:
+                return n
+        return 32
 
     def extract_text_features(self, texts: list[str]) -> np.ndarray:
         """批量提取文本特征。
@@ -115,7 +153,9 @@ class FeatureExtractor:
         self.load_model()
 
         if self.model is None:
-            return self._placeholder_features(len(texts))
+            if self.config.fail_on_placeholder:
+                raise RuntimeError("Text model unavailable and fail_on_placeholder=True")
+            return self._text_hash_features(texts)
 
         all_features = []
         for i in range(0, len(texts), self.config.batch_size):
@@ -129,7 +169,7 @@ class FeatureExtractor:
             ).to(self.config.device)
 
             with torch.no_grad():
-                outputs = self.model(**inputs, output_hidden_states=True)
+                outputs = self._forward_text(inputs)
 
             # Multi-layer fusion + mean pooling
             hidden_states = outputs.hidden_states
@@ -137,6 +177,25 @@ class FeatureExtractor:
             all_features.append(fused.cpu().numpy())
 
         return np.concatenate(all_features, axis=0)
+
+    def _forward_text(self, inputs: dict[str, torch.Tensor]) -> Any:
+        """优先走全模型前向，失败时回退到 language 模型前向。"""
+        assert self.model is not None
+        try:
+            return self.model(**inputs, output_hidden_states=True)
+        except Exception:
+            pass
+
+        for name in ["language_model", "llm", "llm_model", "text_model", "model"]:
+            sub = getattr(self.model, name, None)
+            if sub is None:
+                continue
+            try:
+                return sub(**inputs, output_hidden_states=True)
+            except Exception:
+                continue
+
+        raise RuntimeError("No usable text forward path for current model")
 
     def extract_visual_features(self, images: list[str | Image.Image]) -> np.ndarray:
         """批量提取视觉特征。
@@ -178,11 +237,114 @@ class FeatureExtractor:
         由于 InternVL 的具体接口可能因版本而异，
         这里提供基本框架，实际运行时需根据模型版本调整。
         """
-        # InternVL2.5 的 vision encoder 是 InternViT
-        # 需要使用 model.extract_images() 或类似接口
-        # 由于接口可能变化，这里提供可扩展的占位实现
-        logger.warning("Visual feature extraction requires model-specific implementation. Using pooled text proxy.")
-        return self._placeholder_features(len(images))
+        if self.model is None:
+            if self.config.fail_on_placeholder:
+                raise RuntimeError("Vision model unavailable and fail_on_placeholder=True")
+            self.vision_backend = "image_stats_fallback"
+            return self._image_stats_features(images)
+
+        # Try generic image feature APIs first.
+        try:
+            if self.image_processor is not None:
+                proc = self.image_processor(images=images, return_tensors="pt")
+                model_dtype = next(self.model.parameters()).dtype if self.model is not None else torch.float32
+                proc_cast = {}
+                for k, v in proc.items():
+                    if not torch.is_tensor(v):
+                        continue
+                    t = v.to(self.config.device)
+                    if t.is_floating_point():
+                        t = t.to(model_dtype)
+                    proc_cast[k] = t
+                proc = proc_cast
+
+                # InternVL family: prefer extract_feature path; vision_model often has incompatible signatures.
+                prefer_extract = "internvl" in self.config.model_name.lower()
+
+                if prefer_extract and hasattr(self.model, "extract_feature") and "pixel_values" in proc:
+                    try:
+                        pv = proc["pixel_values"]
+                        with torch.no_grad():
+                            try:
+                                out = self.model.extract_feature(pv)
+                            except Exception:
+                                if pv.ndim == 4:
+                                    out = self.model.extract_feature(pv.unsqueeze(1))
+                                else:
+                                    raise
+                        self.vision_backend = "model.extract_feature"
+                        if isinstance(out, torch.Tensor):
+                            if out.ndim == 3:
+                                out = out.mean(dim=1)
+                            return out.detach().float().cpu().numpy()
+                        if isinstance(out, (tuple, list)) and out and isinstance(out[0], torch.Tensor):
+                            t = out[0]
+                            if t.ndim == 3:
+                                t = t.mean(dim=1)
+                            return t.detach().float().cpu().numpy()
+                    except Exception as e:
+                        logger.warning(f"extract_feature failed: {e}")
+
+                if hasattr(self.model, "get_image_features"):
+                    try:
+                        with torch.no_grad():
+                            out = self.model.get_image_features(**proc)
+                        self.vision_backend = "model.get_image_features"
+                        if isinstance(out, torch.Tensor):
+                            return out.detach().float().cpu().numpy()
+                        if isinstance(out, (tuple, list)) and out and isinstance(out[0], torch.Tensor):
+                            t = out[0]
+                            if t.ndim == 3:
+                                t = t.mean(dim=1)
+                            return t.detach().float().cpu().numpy()
+                    except Exception as e:
+                        logger.warning(f"get_image_features failed: {e}")
+
+                if hasattr(self.model, "vision_model") and "pixel_values" in proc:
+                    try:
+                        with torch.no_grad():
+                            out = self.model.vision_model(pixel_values=proc["pixel_values"], output_hidden_states=True)
+                        if hasattr(out, "hidden_states") and out.hidden_states is not None:
+                            fused = self._fuse_and_pool(out.hidden_states, None)
+                            self.vision_backend = "model.vision_model.hidden_states"
+                            return fused.detach().float().cpu().numpy()
+                    except Exception as e:
+                        if not self._warned_vision_model:
+                            logger.warning(f"vision_model forward failed: {e}")
+                            self._warned_vision_model = True
+
+                if hasattr(self.model, "extract_feature") and "pixel_values" in proc:
+                    try:
+                        pv = proc["pixel_values"]
+                        with torch.no_grad():
+                            try:
+                                out = self.model.extract_feature(pv)
+                            except Exception:
+                                # Some InternVL implementations expect (B, N, C, H, W).
+                                if pv.ndim == 4:
+                                    out = self.model.extract_feature(pv.unsqueeze(1))
+                                else:
+                                    raise
+                        self.vision_backend = "model.extract_feature"
+                        if isinstance(out, torch.Tensor):
+                            if out.ndim == 3:
+                                out = out.mean(dim=1)
+                            return out.detach().float().cpu().numpy()
+                        if isinstance(out, (tuple, list)) and out and isinstance(out[0], torch.Tensor):
+                            t = out[0]
+                            if t.ndim == 3:
+                                t = t.mean(dim=1)
+                            return t.detach().float().cpu().numpy()
+                    except Exception as e:
+                        logger.warning(f"extract_feature failed: {e}")
+        except Exception as e:
+            logger.warning(f"Vision backend failed ({self.config.model_name}): {e}")
+
+        if self.config.fail_on_placeholder:
+            raise RuntimeError("No usable vision backend and fail_on_placeholder=True")
+
+        self.vision_backend = "image_stats_fallback"
+        return self._image_stats_features(images)
 
     def _fuse_and_pool(
         self,
@@ -208,6 +370,28 @@ class FeatureExtractor:
         """生成占位特征向量，用于离线开发。"""
         rng = np.random.RandomState(42)
         return rng.randn(n, dim).astype(np.float32)
+
+    def _text_hash_features(self, texts: list[str], dim: int = 4096) -> np.ndarray:
+        """文本哈希特征：当无法加载文本模型时的可复现兜底。"""
+        out = np.zeros((len(texts), dim), dtype=np.float32)
+        for i, text in enumerate(texts):
+            h = abs(hash(text))
+            rng = np.random.RandomState(h % (2**32 - 1))
+            out[i] = rng.randn(dim).astype(np.float32)
+        return out
+
+    def _image_stats_features(self, images: list[Image.Image], dim: int = 4096) -> np.ndarray:
+        """图像统计特征：基于真实像素，避免随机占位。"""
+        feats = []
+        side = int(np.sqrt(dim))
+        if side * side != dim:
+            side = 64
+            dim = 4096
+        for img in images:
+            arr = np.asarray(img.convert("L").resize((side, side)), dtype=np.float32) / 255.0
+            vec = arr.reshape(-1)
+            feats.append(vec)
+        return np.stack(feats).astype(np.float32)
 
     def extract_and_cache(
         self,

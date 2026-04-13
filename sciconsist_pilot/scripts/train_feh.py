@@ -176,11 +176,35 @@ def main(cfg: DictConfig) -> None:
     torch.manual_seed(cfg.training.seed)
     np.random.seed(cfg.training.seed)
 
-    # 检查特征是否已提取
-    features_dir = Path(cfg.data.processed_dir) / "features"
+    # 检查特征是否已提取。
+    # 兼容两种目录结构：
+    # 1) {processed_dir}/features/train/*.npy
+    # 2) {processed_dir}/train/*.npy
+    processed_dir = Path(cfg.data.processed_dir)
+    features_dir = processed_dir / "features"
+    if not (features_dir / "train" / "visual_features.npy").exists() and (
+        processed_dir / "train" / "visual_features.npy"
+    ).exists():
+        features_dir = processed_dir
+
     if not (features_dir / "train" / "visual_features.npy").exists():
+        if bool(cfg.training.get("require_real_features", False)):
+            raise FileNotFoundError(
+                f"Real features required but not found under {processed_dir}. "
+                "Please run feature caching first."
+            )
         console.print("[yellow]Features not found. Creating placeholder data for pipeline validation...[/yellow]")
         create_placeholder_features(cfg)
+        features_dir = Path(cfg.data.processed_dir) / "features"
+
+    # 自动适配 hidden_dim，避免配置与真实特征不一致。
+    sample_visual = np.load(features_dir / "train" / "visual_features.npy", mmap_mode="r")
+    inferred_hidden_dim = int(sample_visual.shape[1])
+    if inferred_hidden_dim != int(cfg.model.hidden_dim):
+        console.print(
+            f"[yellow]Override hidden_dim: cfg={cfg.model.hidden_dim} -> inferred={inferred_hidden_dim}[/yellow]"
+        )
+        cfg.model.hidden_dim = inferred_hidden_dim
 
     # 加载数据
     train_ds = FEHDataset(features_dir, split="train")
@@ -206,7 +230,13 @@ def main(cfg: DictConfig) -> None:
 
     # 训练配置
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.training.lr, weight_decay=cfg.training.weight_decay)
-    criterion = nn.CrossEntropyLoss()
+    class_weights_cfg = cfg.training.get("class_weights", None)
+    if class_weights_cfg is not None:
+        weights = torch.tensor([float(x) for x in class_weights_cfg], dtype=torch.float32, device=device)
+        criterion = nn.CrossEntropyLoss(weight=weights)
+        console.print(f"Using class weights: {weights.tolist()}")
+    else:
+        criterion = nn.CrossEntropyLoss()
 
     total_steps = len(train_loader) * cfg.training.epochs
     warmup_steps = int(total_steps * cfg.training.warmup_ratio)

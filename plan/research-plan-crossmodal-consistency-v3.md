@@ -783,21 +783,3 @@ for each prompt x (scientific document question):
 3. **封堵冲突过度报告**：5% 训练冲突率 + sensitivity analysis 提供完整数据支撑
 4. **新增 FEH vs GPT-4o judge 对比**：如果 FEH 快 200× 且效果相当 → 独立卖点
 5. **消融从 7 个增至 11 个**：完全透明的实验设计，审稿人找不到"你为什么不做 XX 对比"的攻击点
-
----
-
-## 十三、全版本对照速查表
-
-| 维度 | v2 | v3 | v3.1 |
-|------|----|----|------|
-| Reward | surface sim() | FEH 隐空间三分类 (same-model) | **FEH 隐空间三分类 (cross-model)** |
-| 退化处理 | 无 | NEUTRAL = 0 | **NEUTRAL = -0.1 + informativeness gate** |
-| 冲突处理 | 无 | Conflict Detection Bonus | **+ 冲突率校准 5% + sensitivity analysis** |
-| Reward Hacking 防御 | N/A | 无 | **Cross-Model FEH (InternVL → Qwen)** |
-| Pipeline | SFT → DPO → GRPO (3 阶段) | SFT → FER-GRPO (2 阶段) | SFT → FER-GRPO (2 阶段) |
-| 核心贡献 | 模糊 (3 个都是) | FEH + Tri-State FER | **Cross-Model FEH + Tri-State FER + Conflict Detection** |
-| 消融数量 | 8 | 7 | **11 (含 reward hacking / LLM judge / informativeness)** |
-| 评估集 | 6 | 6 + 扩展 | **6 + Conflict Sensitivity + Informativeness Analysis** |
-| 可解释性 | 无 | 无 | **FEH attention heatmap (CONTRADICTS 时)** |
-| GPU time 估算 | ~50h | ~35-50h | **~90-120h (含 InternVL + 扩充消融)** |
-| 新增文献 | — | +6 篇 | +6 篇 (同 v3) |

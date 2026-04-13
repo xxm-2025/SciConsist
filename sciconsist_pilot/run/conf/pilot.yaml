@@ -45,8 +45,10 @@ training:
   batch_size: 256
   lr: 1e-3
   weight_decay: 0.01
+  class_weights: null
   warmup_ratio: 0.1
   scheduler: "cosine"
+  require_real_features: false
   early_stopping_patience: 3
   device: "cuda"
   seed: 42

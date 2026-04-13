@@ -189,7 +189,24 @@ def run_p3(model: FactualEntailmentHead, features_dir: Path, device: str) -> P3R
 
 
 @torch.no_grad()
-def run_p4(model: FactualEntailmentHead, features_dir: Path, device: str) -> tuple[float, bool]:
+def _eval_accuracy(model: FactualEntailmentHead, features_dir: Path, device: str) -> float:
+    dataset = FEHDataset(features_dir, split="val")
+    loader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=False)
+    all_true, all_pred = [], []
+    for batch in loader:
+        preds, _ = model.predict(batch["visual"].to(device), batch["text"].to(device))
+        all_true.append(batch["label"].numpy())
+        all_pred.append(preds.cpu().numpy())
+    from sklearn.metrics import accuracy_score
+    return float(accuracy_score(np.concatenate(all_true), np.concatenate(all_pred)))
+
+
+def run_p4(
+    model: FactualEntailmentHead,
+    full_features_dir: Path,
+    cropped_features_dir: Path,
+    device: str,
+) -> tuple[float, bool]:
     """P4: Full figure vs cropped region。
 
     对比全图输入和裁剪区域输入的 FEH accuracy 差距。
@@ -202,36 +219,13 @@ def run_p4(model: FactualEntailmentHead, features_dir: Path, device: str) -> tup
     """
     console.print(Panel("[bold]P4: Full Figure vs Cropped Region[/bold]", style="blue"))
 
-    # 在真实实验中:
-    # features_full = Path(features_dir) / "full_figure"
-    # features_crop = Path(features_dir) / "cropped_region"
-    # 分别加载两套特征，在同一验证集上评估 accuracy，计算差距
+    if not (full_features_dir / "val" / "visual_features.npy").exists():
+        raise FileNotFoundError(f"P4 full features missing: {full_features_dir}")
+    if not (cropped_features_dir / "val" / "visual_features.npy").exists():
+        raise FileNotFoundError(f"P4 cropped features missing: {cropped_features_dir}")
 
-    console.print("[yellow]P4 需要两套特征 (full/cropped)。当前为 placeholder 实现。[/yellow]")
-    console.print("[yellow]请先运行 extract_features.py --use_full_figure true/false 生成两套特征。[/yellow]")
-
-    # Placeholder: 对 val 集跑两遍，第二遍加噪声模拟 crop 引入的信息损失
-    dataset = FEHDataset(features_dir, split="val")
-    loader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=False)
-
-    all_true, all_pred_full, all_pred_crop = [], [], []
-    for batch in loader:
-        v_full = batch["visual"].to(device)
-        t = batch["text"].to(device)
-        # 模拟 crop: 视觉特征加噪声
-        v_crop = v_full + torch.randn_like(v_full) * 0.03
-
-        pred_full, _ = model.predict(v_full, t)
-        pred_crop, _ = model.predict(v_crop, t)
-
-        all_true.append(batch["label"].numpy())
-        all_pred_full.append(pred_full.cpu().numpy())
-        all_pred_crop.append(pred_crop.cpu().numpy())
-
-    y_true = np.concatenate(all_true)
-    from sklearn.metrics import accuracy_score
-    acc_full = accuracy_score(y_true, np.concatenate(all_pred_full))
-    acc_crop = accuracy_score(y_true, np.concatenate(all_pred_crop))
+    acc_full = _eval_accuracy(model, full_features_dir, device)
+    acc_crop = _eval_accuracy(model, cropped_features_dir, device)
 
     evaluator = FEHEvaluator()
     gap, acceptable = evaluator.evaluate_accuracy_gap(acc_full, acc_crop, max_gap=0.05)
@@ -244,7 +238,13 @@ def run_p4(model: FactualEntailmentHead, features_dir: Path, device: str) -> tup
 
 
 @torch.no_grad()
-def run_p5(features_dir: Path, device: str) -> tuple[float, bool]:
+def run_p5(
+    ckpt_cross: str,
+    ckpt_same: str,
+    features_cross_dir: Path,
+    features_same_dir: Path,
+    device: str,
+) -> tuple[float, bool]:
     """P5: Cross-model vs Same-model FEH。
 
     对比 FEH 在 InternVL 特征 vs Qwen 特征上的 accuracy 差距。
@@ -255,25 +255,37 @@ def run_p5(features_dir: Path, device: str) -> tuple[float, bool]:
     """
     console.print(Panel("[bold]P5: Cross-Model vs Same-Model FEH[/bold]", style="blue"))
 
-    # 在真实实验中:
-    # feh_cross = load_feh("outputs/checkpoints/feh_cross.pt")
-    # feh_same = load_feh("outputs/checkpoints/feh_same.pt")
-    # features_internvl = features_dir / "internvl"
-    # features_qwen = features_dir / "qwen"
-    # 分别评估 accuracy，计算差距
+    if not Path(ckpt_cross).exists() or not Path(ckpt_same).exists():
+        raise FileNotFoundError("P5 checkpoints missing")
+    if not (features_cross_dir / "val" / "visual_features.npy").exists():
+        raise FileNotFoundError(f"P5 cross features missing: {features_cross_dir}")
+    if not (features_same_dir / "val" / "visual_features.npy").exists():
+        raise FileNotFoundError(f"P5 same features missing: {features_same_dir}")
 
-    console.print("[yellow]P5 需要两套 checkpoint + 两套特征。当前为 placeholder。[/yellow]")
-    console.print("[yellow]请先分别用 InternVL 和 Qwen 提取特征，再训练两个 FEH。[/yellow]")
-    console.print("[yellow]  1. python scripts/extract_features.py features.reward_encoder=OpenGVLab/InternVL2_5-8B[/yellow]")
-    console.print("[yellow]  2. python scripts/extract_features.py features.reward_encoder=Qwen/Qwen2.5-VL-7B-Instruct[/yellow]")
+    model_cross = load_feh(ckpt_cross, device)
+    model_same = load_feh(ckpt_same, device)
 
-    return 0.0, True  # placeholder
+    acc_cross = _eval_accuracy(model_cross, features_cross_dir, device)
+    acc_same = _eval_accuracy(model_same, features_same_dir, device)
+
+    evaluator = FEHEvaluator()
+    gap, acceptable = evaluator.evaluate_accuracy_gap(acc_cross, acc_same, max_gap=0.10)
+    console.print(f"  Cross-model accuracy: {acc_cross:.4f}")
+    console.print(f"  Same-model accuracy:  {acc_same:.4f}")
+    console.print(f"  Gap: {gap:.4f} {'✅' if acceptable else '❌'} (max 0.10)")
+    return gap, acceptable
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="SciConsist Pilot Experiments (P1-P5)")
     parser.add_argument("--checkpoint", default="outputs/checkpoints/feh_best.pt", help="FEH checkpoint 路径")
     parser.add_argument("--features-dir", default="data/processed/features", help="预提取特征目录")
+    parser.add_argument("--p4-full-features-dir", default="", help="P4 full-figure 特征目录")
+    parser.add_argument("--p4-crop-features-dir", default="", help="P4 cropped 特征目录")
+    parser.add_argument("--p5-cross-checkpoint", default="", help="P5 cross-model FEH checkpoint")
+    parser.add_argument("--p5-same-checkpoint", default="", help="P5 same-model FEH checkpoint")
+    parser.add_argument("--p5-cross-features-dir", default="", help="P5 cross-model 特征目录")
+    parser.add_argument("--p5-same-features-dir", default="", help="P5 same-model 特征目录")
     parser.add_argument("--experiments", nargs="+", default=["p1", "p2", "p3", "p4", "p5"], help="要运行的实验")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output", default="outputs/pilot_results.json", help="结果输出路径")
@@ -307,11 +319,17 @@ def main() -> None:
         }
 
     if "p4" in args.experiments:
-        gap, ok = run_p4(model, features_dir, args.device)
+        full_dir = Path(args.p4_full_features_dir) if args.p4_full_features_dir else features_dir
+        crop_dir = Path(args.p4_crop_features_dir) if args.p4_crop_features_dir else features_dir
+        gap, ok = run_p4(model, full_dir, crop_dir, args.device)
         results["p4"] = {"gap": gap, "acceptable": ok}
 
     if "p5" in args.experiments:
-        gap, ok = run_p5(features_dir, args.device)
+        ckpt_cross = args.p5_cross_checkpoint or args.checkpoint
+        ckpt_same = args.p5_same_checkpoint or args.checkpoint
+        feat_cross = Path(args.p5_cross_features_dir) if args.p5_cross_features_dir else features_dir
+        feat_same = Path(args.p5_same_features_dir) if args.p5_same_features_dir else features_dir
+        gap, ok = run_p5(ckpt_cross, ckpt_same, feat_cross, feat_same, args.device)
         results["p5"] = {"gap": gap, "acceptable": ok}
 
     # 汇总报告
