@@ -121,6 +121,8 @@ class VSRReward:
         response: str,
         tables: list[StructuredTable],
         evidence_text: str = "",
+        paper_id: str = "",
+        image_path: str = "",
     ) -> VSRRewardOutput:
         """计算一条 response 的 VSR reward
 
@@ -128,6 +130,8 @@ class VSRReward:
             response: 模型生成的完整回答
             tables: 该论文的结构化表格
             evidence_text: 额外证据文本 (caption + references, Layer 2 用)
+            paper_id: 论文 ID (Layer 2 cached 模式用于检索视觉缓存)
+            image_path: 图像路径 (Layer 2 full 模式可选)
 
         Returns:
             VSRRewardOutput 包含总 reward 和各层详情
@@ -148,7 +152,7 @@ class VSRReward:
 
         for decision in decisions:
             claim_reward, details = self._compute_claim_reward(
-                decision, tables, evidence_text
+                decision, tables, evidence_text, paper_id, image_path
             )
             claim_rewards.append(details)
             total_claim_reward += claim_reward
@@ -176,6 +180,8 @@ class VSRReward:
         responses: list[str],
         tables_list: list[list[StructuredTable]],
         evidence_texts: list[str] | None = None,
+        paper_ids: list[str] | None = None,
+        image_paths: list[str] | None = None,
     ) -> list[VSRRewardOutput]:
         """批量计算
 
@@ -183,15 +189,23 @@ class VSRReward:
             responses: response 列表
             tables_list: 每条 response 对应的表格列表
             evidence_texts: 每条 response 的证据文本
+            paper_ids: 每条 response 对应的 paper_id
+            image_paths: 每条 response 对应的 image_path
 
         Returns:
             VSRRewardOutput 列表
         """
         if evidence_texts is None:
             evidence_texts = [""] * len(responses)
+        if paper_ids is None:
+            paper_ids = [""] * len(responses)
+        if image_paths is None:
+            image_paths = [""] * len(responses)
         return [
-            self.compute(resp, tables, ev)
-            for resp, tables, ev in zip(responses, tables_list, evidence_texts)
+            self.compute(resp, tables, ev, pid, img)
+            for resp, tables, ev, pid, img in zip(
+                responses, tables_list, evidence_texts, paper_ids, image_paths
+            )
         ]
 
     def _compute_claim_reward(
@@ -199,6 +213,8 @@ class VSRReward:
         decision: RoutingDecision,
         tables: list[StructuredTable],
         evidence_text: str,
+        paper_id: str = "",
+        image_path: str = "",
     ) -> tuple[float, dict]:
         """计算单条 claim 的聚合 reward
 
@@ -232,7 +248,12 @@ class VSRReward:
                     layers.append(VerificationLayer.LEARNED)
 
         if VerificationLayer.LEARNED in layers:
-            r = self._run_learned(claim.text, evidence_text)
+            r = self._run_learned(
+                claim.text,
+                evidence_text,
+                paper_id=paper_id,
+                image_path=image_path,
+            )
             layer_results[2] = r
 
         if not layer_results:
@@ -264,11 +285,26 @@ class VSRReward:
 
         return reward, details
 
-    def _run_learned(self, claim_text: str, evidence_text: str) -> VerificationResult:
+    def _run_learned(
+        self,
+        claim_text: str,
+        evidence_text: str,
+        paper_id: str = "",
+        image_path: str = "",
+    ) -> VerificationResult:
         """Layer 2: learned verifier 或 neutral fallback"""
         if self.learned_verifier:
             try:
-                reward = self.learned_verifier(claim_text, evidence_text)
+                try:
+                    reward = self.learned_verifier(
+                        claim_text,
+                        evidence_text,
+                        paper_id=paper_id,
+                        image_path=image_path,
+                    )
+                except TypeError:
+                    # 兼容仅支持 (claim_text, evidence_text) 的旧版 verifier
+                    reward = self.learned_verifier(claim_text, evidence_text)
                 return VerificationResult(
                     layer=VerificationLayer.LEARNED,
                     reward=float(reward),

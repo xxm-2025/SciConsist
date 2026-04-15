@@ -381,6 +381,8 @@ class VSRGRPOTrainer:
             response=response,
             tables=tables,
             evidence_text=sample.evidence_text,
+            paper_id=sample.paper_id,
+            image_path=sample.image_paths[0] if sample.image_paths else "",
         )
         return output.total_reward, output
 
@@ -802,6 +804,7 @@ def run_training(config: VSRGRPOConfig) -> dict:
         for step_idx, sample in enumerate(train_samples):
             log = trainer.train_step(sample, optimizer)
             epoch_logs.append(log)
+            trainer.state.step_logs.append(log)
 
             if config.log_interval > 0 and (step_idx + 1) % config.log_interval == 0:
                 recent = epoch_logs[-config.log_interval:]

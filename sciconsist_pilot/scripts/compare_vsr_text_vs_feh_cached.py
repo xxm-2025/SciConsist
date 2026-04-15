@@ -285,10 +285,18 @@ def run_comparison(
     for s in samples:
         tables = table_index.get(s.paper_id)
         out_text = vsr_text.compute(
-            response=s.answer_text, tables=tables, evidence_text=s.evidence_text
+            response=s.answer_text,
+            tables=tables,
+            evidence_text=s.evidence_text,
+            paper_id=s.paper_id,
+            image_path=s.image_paths[0] if s.image_paths else "",
         )
         out_cached = vsr_cached.compute(
-            response=s.answer_text, tables=tables, evidence_text=s.evidence_text
+            response=s.answer_text,
+            tables=tables,
+            evidence_text=s.evidence_text,
+            paper_id=s.paper_id,
+            image_path=s.image_paths[0] if s.image_paths else "",
         )
 
         cache_file = Path(visual_cache_dir) / f"{s.paper_id}.npy"
