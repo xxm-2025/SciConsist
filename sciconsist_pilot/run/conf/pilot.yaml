@@ -76,6 +76,53 @@ pilot:
   p5:
     max_accuracy_gap: 0.10   # 差距 < 10% → cross-model 可行
 
+# --- VSR Reward ---
+vsr:
+  lambda_coverage: 0.1
+  lambda_specificity: 0.05
+  layer_weights:
+    0: 0.5     # Symbolic (unhackable)
+    1: 0.3     # Semi-Symbolic
+    2: 0.2     # Learned
+  fallback_confidence_gate: 0.7
+  symbolic:
+    entity_match_threshold: 0.7
+    value_exact_tolerance: 0.05
+    value_approx_tolerance_pct: 1.0
+    confidence_gate: 0.9
+    exact_match_reward: 1.0
+    approx_match_reward: 0.8
+    mismatch_reward: -1.0
+  semi_symbolic:
+    # SemiSymbolicVerifierConfig defaults
+    relation_correct_reward: 0.8
+    relation_partial_reward: 0.5
+    relation_wrong_reward: -0.8
+    trend_correct_reward: 0.8
+    trend_wrong_reward: -0.8
+
+# --- VSR-GRPO Training ---
+vsr_grpo:
+  policy_model: "Qwen/Qwen2.5-VL-7B-Instruct"
+  use_lora: true
+  lora_r: 16
+  lora_alpha: 32
+  lora_target_modules: "q_proj,k_proj,v_proj,o_proj"
+  epochs: 1
+  group_size: 4
+  max_new_tokens: 256
+  temperature: 0.8
+  lr: 1.0e-5
+  adv_scale: 0.5
+  max_seq_len: 2048
+  ema_decay: 0.95
+  splits_filter: "tqa,mqa"
+  source_filter: "arxiv"
+  data:
+    train: "/root/shared-nvme/sciconsist_pilot/processed/scimdr_sft_train.jsonl"
+    val: "/root/shared-nvme/sciconsist_pilot/processed/scimdr_sft_val.jsonl"
+    table_index: "/root/shared-nvme/sciconsist_pilot/processed/table_structured/paper_tables.jsonl"
+
 # --- Output ---
 output:
   dir: "outputs"
