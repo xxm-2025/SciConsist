@@ -1,42 +1,28 @@
-# Claude Configuration Git Ignore
-
-# System files
+# System
 .DS_Store
 Thumbs.db
 
-# Sensitive and local configuration
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Sensitive
 .env
 .env.local
 .mcp.json
-settings*.json
-settings*.json.bak
+
+# Temp & cache
+temp/
+cache/
+logs/
 *.backup
 
-# History and session data
-history.jsonl
-session-env/
-shell-snapshots/
-file-history/
-
-# Cache and temporary files
-cache/
-debug/
-downloads/
-ide/
-logs/
-paste-cache/
-todos/
-
-# Telemetry and statistics
-telemetry/
-stats-cache.json
-statsig/
-
-# Other temporary files
-docs/
-plan/
-plans/
-projects/
-temp/
-tasks/
-teams/
+# Large data handled by sciconsist_pilot/.gitignore
